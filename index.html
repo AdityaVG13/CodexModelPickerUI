@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>⚽ Worst Model Picker in the World</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a14;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    canvas {
+      display: block;
+      border-radius: 8px;
+      box-shadow:
+        0 0 80px rgba(233,69,96,0.12),
+        0 8px 32px rgba(0,0,0,0.6),
+        inset 0 0 0 1px rgba(255,255,255,0.06);
+      max-width: 100vw;
+      max-height: 100vh;
+      touch-action: none;
+    }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px;
+      padding: 0; margin: -1px; overflow: hidden;
+      clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="sr-only" id="game-status" role="status" aria-live="polite">Press Space to begin.</div>
+  <canvas id="c" role="img" aria-label="Penalty shootout game. Arrow keys to aim, Space to kick."></canvas>
+  <script>
+// Worst Model Picker — penalty shootout Codex model picker
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('game-status');
+const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+let muted = false;
+const W = 800, H = 600;
+canvas.width = W;
+canvas.height = H;
+
+// ── Config ──────────────────────────────────
+const MODELS = [
+  'GPT-5.5',
+  'GPT-5.4',
+  'GPT-5.4-Mini',
+  'GPT-5.3-Codex-Spark',
+];
+
+const REASONING = ['Low', 'Medium', 'High', 'Extra High'];
+
+const SPEED = ['Standard', '⚡ Fast'];
+
+const GOAL = { l: 270, r: 530, t: 88, b: 158 };
+const GOAL_CX = (GOAL.l + GOAL.r) / 2;
+const GOAL_W = GOAL.r - GOAL.l;
+
+const PLAYER_Y = 485;
+const GOALIE_Y = 158;
+const PLAYER_MIN_X = 295;
+const PLAYER_MAX_X = 505;
+const SAVE_RADIUS = 34;
+
+const DIFF = {
+  model:     { read: 0.28, dive: 3.0, amp: 95, spd: 0.024 },
+  reasoning: { read: 0.40, dive: 4.0, amp: 70, spd: 0.030 },
+  speed:     { read: 0.52, dive: 5.2, amp: 50, spd: 0.038 },
+};
+
+const SWEET_POWER_MIN = 0.15;
+const SWEET_POWER_MAX = 0.88;
+const TAUNTS = ['Too easy 😏', 'Nope! 🧤', 'Try again 💪', 'Not today 🥱'];
+
+// ── Audio ───────────────────────────────────
+let audioCtx;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+function beep(freq, dur, type = 'square', vol = 0.08) {
+  if (muted) return;
+  ensureAudio();
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  g.gain.setValueAtTime(vol, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(); o.stop(audioCtx.currentTime + dur);
+}
+function sfxKick()  { beep(130, 0.12, 'triangle', 0.12); }
+function sfxGoal()  { beep(523, 0.1); setTimeout(() => beep(659, 0.1), 100); setTimeout(() => beep(784, 0.15), 200); }
+function sfxSave()  { beep(180, 0.3, 'sawtooth', 0.06); }
+function sfxCycle() { beep(300, 0.08); setTimeout(() => beep(250, 0.12), 80); }
+function sfxWhistle() { beep(880, 0.15, 'sine', 0.04); setTimeout(() => beep(1100, 0.25, 'sine', 0.03), 150); }
+function sfxClang() {
+  // Metallic post hit: layered high square tones w/ fast decay
+  beep(1400, 0.18, 'square', 0.10);
+  setTimeout(() => beep(2100, 0.12, 'square', 0.07), 20);
+  setTimeout(() => beep(1750, 0.22, 'triangle', 0.05), 40);
+}
+
+// ── Input ───────────────────────────────────
+const keys = {};
+const pressed = {};   // single-fire
+const handledKeys = ['Space','ArrowLeft','ArrowRight','Enter','KeyR','Escape','KeyM'];
+document.addEventListener('keydown', e => {
+  if (handledKeys.includes(e.code)) e.preventDefault();
+  keys[e.code] = true;
+  if (!e.repeat) pressed[e.code] = true;
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+function consume(code) { if (pressed[code]) { pressed[code] = false; return true; } return false; }
+
+// ── Touch ───────────────────────────────────
+let touchAim = 0; // -1 left, 0 none, 1 right
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  for (const t of e.changedTouches) {
+    const x = (t.clientX - rect.left) / rect.width;
+    if (x < 0.3) { touchAim = -1; keys.ArrowLeft = true; }
+    else if (x > 0.7) { touchAim = 1; keys.ArrowRight = true; }
+    else { pressed.Space = true; }
+  }
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  keys.ArrowLeft = false;
+  keys.ArrowRight = false;
+  touchAim = 0;
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  keys.ArrowLeft = false; keys.ArrowRight = false;
+  for (const t of e.changedTouches) {
+    const x = (t.clientX - rect.left) / rect.width;
+    if (x < 0.3) { touchAim = -1; keys.ArrowLeft = true; }
+    else if (x > 0.7) { touchAim = 1; keys.ArrowRight = true; }
+  }
+}, { passive: false });
+
+
+// ── State ───────────────────────────────────
+let G;
+function resetGame() {
+  G = {
+    state: 'title',          // title|aim|power|kick|celebrate|miss|done
+    phase: 'model',          // model|reasoning|speed
+    modelIdx: 0,
+    reasoningIdx: 0,
+    speedIdx: 0,
+    selectedModel: null,
+    selectedReasoning: null,
+    selectedSpeed: null,
+    t: 0,
+    st: 0,                   // state timer
+    player: { x: W / 2 },
+    ball: { x: W / 2, y: PLAYER_Y - 12, vx: 0, vy: 0, spin: 0, trail: [] },
+    goalie: { x: GOAL_CX, lean: 0 },
+    goalieTarget: GOAL_CX,
+    wind: 0,
+    power: 0,
+    powerDir: 1,
+    taunt: '',
+    tauntTimer: 0,
+    hardFlash: 0,
+    particles: [],
+    shake: 0,
+    commentary: '',
+    subtext: '',
+    kicks: 0,
+    goals: 0,
+    runUp: 0,                // kick run-up animation
+    netRipple: null,         // {x,y,age} net bulge on goal
+    postClang: null,         // {x,y,age} post hit spark + ring
+  };
+}
+resetGame();
+
+
+function resetKick() {
+  G.player.x = W / 2;
+  G.ball = { x: W / 2, y: PLAYER_Y - 48, vx: 0, vy: 0, spin: 0, trail: [] };
+  G.goalie.x = GOAL_CX;
+  G.goalie.lean = 0;
+  G.goalieTarget = GOAL_CX;
+  G.wind = (Math.random() < 0.5 ? -1 : 1) * (0.35 + Math.random() * 0.65);
+  G.power = 0;
+  G.powerDir = 1;
+  G.taunt = '';
+  G.tauntTimer = 0;
+  G.shake = 0;
+  G.commentary = '';
+  G.subtext = '';
+  G.runUp = 0;
+  G.st = 0;
+  G.netRipple = null;
+  G.postClang = null;
+}
+
+// ── Game Logic ──────────────────────────────
+function performKick() {
+  G.state = 'kick';
+  G.st = 0;
+  G.kicks++;
+  G.runUp = 1;
+  sfxKick();
+
+  const d = DIFF[G.phase];
+  const weak = G.power < SWEET_POWER_MIN;
+  const over = G.power > SWEET_POWER_MAX;
+  const noiseX = (Math.random() - 0.5) * (weak ? 10 : 18);
+  const targetX = Math.max(GOAL.l + 12, Math.min(GOAL.r - 12, G.player.x + noiseX));
+  const targetY = over ? GOAL.t - 48 - (G.power - SWEET_POWER_MAX) * 150 : weak ? GOAL.b + 24 : GOAL.t + 30;
+  const dx = targetX - G.ball.x;
+  const dy = targetY - G.ball.y;
+  const dist = Math.hypot(dx, dy);
+  const speed = weak ? 5.6 + G.power * 2 : 8.2 + G.power * 4.5;
+  G.ball.vx = (dx / dist) * speed;
+  G.ball.vy = (dy / dist) * speed;
+  G.ball.spin = dx * 0.008;
+
+  if (weak) {
+    G.goalieTarget = targetX;
+  } else {
+    const r = Math.random();
+    if (r < d.read) {
+      G.goalieTarget = targetX;                                     // correct read
+    } else if (r < d.read + 0.25) {
+      G.goalieTarget = GOAL_CX + (GOAL_CX - targetX);              // wrong way
+    } else if (r < d.read + 0.45) {
+      G.goalieTarget = G.goalie.x;                                  // stay put
+    } else {
+      G.goalieTarget = GOAL.l + 30 + Math.random() * (GOAL_W - 60);// random
+    }
+  }
+  G.goalieTarget = Math.max(GOAL.l + 18, Math.min(GOAL.r - 18, G.goalieTarget));
+}
+
+function spawnParticles(x, y, n, colors) {
+  if (reduceMotion) return;
+  for (let i = 0; i < n; i++) {
+    G.particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 12,
+      vy: -Math.random() * 9 - 1,
+      life: 40 + Math.random() * 70,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      sz: 2 + Math.random() * 5,
+    });
+  }
+}
+
+// ── Update ──────────────────────────────────
+function update() {
+  G.t++;
+  G.st++;
+
+  if (consume('KeyM')) muted = !muted;
+  if (consume('Escape') && G.state !== 'title' && G.state !== 'done') resetGame();
+
+  // Particles
+  for (let i = G.particles.length - 1; i >= 0; i--) {
+    const p = G.particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.18; p.life--;
+    if (p.life <= 0) G.particles.splice(i, 1);
+  }
+  if (reduceMotion) G.shake = 0;
+  else if (G.shake > 0.3) G.shake *= 0.88;
+  else G.shake = 0;
+  if (G.tauntTimer > 0) G.tauntTimer--;
+  if (G.hardFlash > 0) G.hardFlash--;
+  // Net ripple aging
+  if (G.netRipple) { G.netRipple.age++; if (G.netRipple.age > 60) G.netRipple = null; }
+  // Post clang aging
+  if (G.postClang) { G.postClang.age++; if (G.postClang.age > 40) G.postClang = null; }
+
+  // Run-up animation
+  if (G.runUp > 0 && G.runUp < 8) G.runUp++;
+
+  switch (G.state) {
+    case 'title':
+      if (consume('Space') || consume('Enter')) {
+        G.state = 'aim'; G.st = 0; resetKick(); sfxWhistle();
+      }
+      break;
+
+    case 'aim': {
+      const hardMode = G.phase !== 'model';
+      const playerSpeed = hardMode ? 3.2 : 4;
+      if (keys.ArrowLeft)  G.player.x = Math.max(PLAYER_MIN_X, G.player.x - playerSpeed);
+      if (keys.ArrowRight) G.player.x = Math.min(PLAYER_MAX_X, G.player.x + playerSpeed);
+      G.ball.x = G.player.x;
+      G.ball.y = PLAYER_Y - 48;
+
+      const d = DIFF[G.phase];
+      const goalieSpd = hardMode ? d.spd * 1.3 : d.spd;
+      G.goalie.x = GOAL_CX
+        + Math.sin(G.t * goalieSpd) * d.amp
+        + Math.sin(G.t * goalieSpd * 2.7) * (d.amp * 0.25);
+      G.goalie.x = Math.max(GOAL.l + 22, Math.min(GOAL.r - 22, G.goalie.x));
+
+      if (consume('Space')) { G.state = 'power'; G.st = 0; G.power = 0; G.powerDir = 1; }
+      break;
+    }
+
+    case 'power': {
+      const d = DIFF[G.phase];
+      const hardMode = G.phase !== 'model';
+      const goalieSpd = hardMode ? d.spd * 1.3 : d.spd;
+      G.power += 0.018 * G.powerDir;
+      if (G.power >= 1) { G.power = 1; G.powerDir = -1; }
+      if (G.power <= 0) { G.power = 0; G.powerDir = 1; }
+      G.ball.x = G.player.x;
+      G.ball.y = PLAYER_Y - 48;
+      G.goalie.x = GOAL_CX
+        + Math.sin(G.t * goalieSpd) * d.amp
+        + Math.sin(G.t * goalieSpd * 2.7) * (d.amp * 0.25);
+      G.goalie.x = Math.max(GOAL.l + 22, Math.min(GOAL.r - 22, G.goalie.x));
+
+      if (consume('Space')) performKick();
+      break;
+    }
+
+    case 'kick': {
+      G.ball.vx += G.wind * 0.035;
+      G.ball.x += G.ball.vx;
+      G.ball.y += G.ball.vy;
+      G.ball.spin += G.ball.vx * 0.003;
+
+      // Ball trail: record recent positions (capped)
+      G.ball.trail.push({ x: G.ball.x, y: G.ball.y });
+      if (G.ball.trail.length > 14) G.ball.trail.shift();
+
+      const d = DIFF[G.phase];
+      const diveSpeed = G.phase !== 'model' ? d.dive * 1.3 : d.dive;
+      const gdx = G.goalieTarget - G.goalie.x;
+      if (Math.abs(gdx) > diveSpeed) G.goalie.x += Math.sign(gdx) * diveSpeed;
+      else G.goalie.x = G.goalieTarget;
+      G.goalie.x = Math.max(GOAL.l + 12, Math.min(GOAL.r - 12, G.goalie.x));
+      // Goalie lean toward dive direction
+      G.goalie.lean += (Math.sign(gdx) * 0.6 - G.goalie.lean) * 0.25;
+      // Settle lean when reached target
+      if (Math.abs(gdx) <= diveSpeed) G.goalie.lean *= 0.85;
+
+      // Post hit detection: ball passing near a post mid-flight
+      if (!G.postClang) {
+        const postY = GOAL.b;
+        const nearL = Math.abs(G.ball.x - GOAL.l) < 6;
+        const nearR = Math.abs(G.ball.x - GOAL.r) < 6;
+        if ((nearL || nearR) && G.ball.y <= postY + 6 && G.ball.y >= GOAL.t - 10) {
+          const px = nearL ? GOAL.l : GOAL.r;
+          G.postClang = { x: px, y: G.ball.y, age: 0 };
+          sfxClang();
+          // Sparks
+          for (let i = 0; i < 14; i++) {
+            G.particles.push({
+              x: px, y: G.ball.y,
+              vx: (Math.random() - 0.5) * 10,
+              vy: (Math.random() - 0.8) * 9,
+              life: 18 + Math.random() * 22,
+              color: ['#fff','#ffe066','#ffd700'][Math.floor(Math.random()*3)],
+              sz: 1.5 + Math.random() * 2.5,
+            });
+          }
+        }
+      }
+
+      if (G.ball.y <= GOAL.b || (G.power > SWEET_POWER_MAX && G.ball.y <= GOAL.t - 30)) {
+        const weak = G.power < SWEET_POWER_MIN;
+        const high = G.power > SWEET_POWER_MAX && G.ball.y <= GOAL.t;
+        const saved = Math.abs(G.ball.x - G.goalie.x) < SAVE_RADIUS * (weak ? 1.3 : 1);
+        const wide = G.ball.x < GOAL.l + 8 || G.ball.x > GOAL.r - 8;
+
+        if (wide || saved || high) {
+          // SAVED / MISS
+          G.state = 'miss'; G.st = 0; G.shake = 8;
+          sfxSave();
+          if (saved && !wide && !high) {
+            G.taunt = TAUNTS[Math.floor(Math.random() * TAUNTS.length)];
+            G.tauntTimer = 90;
+          }
+          if (G.phase === 'model') G.modelIdx = (G.modelIdx + 1) % MODELS.length;
+          else if (G.phase === 'reasoning') G.reasoningIdx = (G.reasoningIdx + 1) % REASONING.length;
+          else G.speedIdx = (G.speedIdx + 1) % SPEED.length;
+          const phrases = high
+            ? ['OVER THE BAR!', 'TO THE MOON!', 'ROW Z!']
+            : wide
+              ? ['WIDE!', 'OFF TARGET!', 'ROW Z!']
+              : weak
+                ? ['WEAK!', 'DRIBBLED!', 'BARELY MOVING!']
+                : ['SAVED!', 'DENIED!', 'WHAT A SAVE!', 'NO WAY!', 'THE KEEPER SAYS NO!'];
+          G.commentary = phrases[Math.floor(Math.random() * phrases.length)];
+          const items = G.phase === 'model' ? MODELS : G.phase === 'reasoning' ? REASONING : SPEED;
+          const idx = G.phase === 'model' ? G.modelIdx : G.phase === 'reasoning' ? G.reasoningIdx : G.speedIdx;
+          G.subtext = 'Next up: ' + items[idx];
+          sfxCycle();
+        } else {
+          // GOOOAL!
+          G.state = 'celebrate'; G.st = 0; G.shake = 14; G.goals++;
+          sfxGoal();
+          if (G.phase === 'model') G.selectedModel = MODELS[G.modelIdx];
+          else if (G.phase === 'reasoning') G.selectedReasoning = REASONING[G.reasoningIdx];
+          else G.selectedSpeed = SPEED[G.speedIdx];
+          spawnParticles(G.ball.x, G.ball.y, 60, ['#ffdf00','#ff6b35','#fff','#e94560','#10b981']);
+          const yells = ['GOOOAL!', 'WHAT A STRIKE!', 'BRILLIANT!', 'UNSTOPPABLE!', 'TOP BINS!'];
+          G.commentary = yells[Math.floor(Math.random() * yells.length)];
+          const name = G.phase === 'model' ? G.selectedModel : G.phase === 'reasoning' ? G.selectedReasoning : G.selectedSpeed;
+          G.subtext = '✓ ' + name;
+          // Net ripple at impact point + crowd eruption
+          G.netRipple = { x: G.ball.x, y: G.ball.y, age: 0 };
+        }
+        G.ball.vx = 0; G.ball.vy = 0;
+      }
+      break;
+    }
+
+    case 'celebrate':
+      if (G.st > 130) {
+        if (G.phase === 'model') {
+          G.phase = 'reasoning';
+          G.state = 'aim'; resetKick();
+          G.hardFlash = 80;
+          sfxWhistle();
+        } else if (G.phase === 'reasoning') {
+          G.phase = 'speed';
+          G.state = 'aim'; resetKick();
+          sfxWhistle();
+        } else {
+          G.state = 'done'; G.st = 0;
+        }
+      }
+      break;
+
+    case 'miss':
+      if (G.st > 100) { G.state = 'aim'; resetKick(); }
+      break;
+
+    case 'done':
+      if (consume('KeyR') || consume('Space') || consume('Enter')) resetGame();
+      // Continuous confetti
+      if (!reduceMotion && G.t % 5 === 0)
+        spawnParticles(Math.random() * W, -10, 3, ['#ffdf00','#e94560','#2563eb','#10b981','#8b5cf6','#f59e0b']);
+      break;
+  }
+  syncUI();
+}
+
+function syncUI() {
+  if (!statusEl) return;
+  const st = G.state;
+  if (st === 'done') statusEl.textContent = `Selected: ${G.selectedModel}, ${G.selectedReasoning}, ${G.selectedSpeed}.`;
+  else if (st === 'celebrate' || st === 'miss') statusEl.textContent = G.commentary;
+}
+
+// ── Drawing ─────────────────────────────────
+function drawPitch() {
+  for (let i = 0; i < 16; i++) {
+    ctx.fillStyle = i % 2 === 0 ? '#2d8a4e' : '#339956';
+    ctx.fillRect(0, i * 40, W, 40);
+  }
+  // Subtle dark strip behind the goal for depth
+  ctx.fillStyle = 'rgba(0,0,0,0.15)';
+  ctx.fillRect(GOAL.l - 30, GOAL.t - 20, GOAL_W + 60, 30);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 2;
+  // Penalty area
+  ctx.strokeRect(195, GOAL.b, 410, 260);
+  // 6-yard box
+  ctx.strokeRect(275, GOAL.b, 250, 110);
+  // Penalty spot
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(W / 2, 310, 3, 0, Math.PI * 2); ctx.fill();
+  // D arc (curves away from goal, centered on penalty spot)
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.beginPath(); ctx.arc(W / 2, 310, 65, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke();
+}
+
+function drawGoal() {
+  // Net ripple displacement function (bulges outward near impact point)
+  const r = G.netRipple;
+  const bulgeAmt = r ? Math.sin(r.age * 0.35) * Math.exp(-r.age / 18) * 10 : 0;
+  function netOffset(x, y) {
+    if (!r || bulgeAmt === 0) return 0;
+    const dx = x - r.x, dy = y - r.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 55) return 0;
+    // Push away from impact center
+    const falloff = Math.cos((dist / 55) * Math.PI * 0.5);
+    return bulgeAmt * falloff * (dy >= 0 ? 1 : 0.3); // stronger on lower net
+  }
+
+  // Net
+  ctx.strokeStyle = 'rgba(200,200,200,0.13)';
+  ctx.lineWidth = 1;
+  for (let x = GOAL.l; x <= GOAL.r; x += 12) {
+    ctx.beginPath();
+    ctx.moveTo(x, GOAL.t);
+    for (let y = GOAL.t; y <= GOAL.b; y += 6) {
+      ctx.lineTo(x + netOffset(x, y), y);
+    }
+    ctx.stroke();
+  }
+  for (let y = GOAL.t; y <= GOAL.b; y += 12) {
+    ctx.beginPath();
+    ctx.moveTo(GOAL.l, y);
+    for (let x = GOAL.l; x <= GOAL.r; x += 6) {
+      ctx.lineTo(x, y + netOffset(x, y));
+    }
+    ctx.stroke();
+  }
+  // Net background
+  ctx.fillStyle = 'rgba(180,180,180,0.06)';
+  ctx.fillRect(GOAL.l, GOAL.t, GOAL_W, GOAL.b - GOAL.t);
+  // Posts
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(GOAL.l - 4, GOAL.t - 2, 5, GOAL.b - GOAL.t + 4);
+  ctx.fillRect(GOAL.r - 1, GOAL.t - 2, 5, GOAL.b - GOAL.t + 4);
+  // Crossbar
+  ctx.fillRect(GOAL.l - 4, GOAL.t - 5, GOAL_W + 8, 7);
+  // Post shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.1)';
+  ctx.fillRect(GOAL.l + 1, GOAL.t + 3, 2, GOAL.b - GOAL.t - 2);
+  ctx.fillRect(GOAL.r + 1, GOAL.t + 3, 2, GOAL.b - GOAL.t - 2);
+
+  // Post hit clang ring
+  if (G.postClang) {
+    const pc = G.postClang;
+    const a = 1 - pc.age / 40;
+    const rad = 4 + pc.age * 1.6;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.strokeStyle = '#ffe066';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(pc.x, pc.y, rad, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawChar(x, y, jersey, shorts, gloves, kickFrame, lean) {
+  ctx.save();
+  ctx.translate(x, y);
+  // Goalie dive lean: rotate whole body around feet, toward dive direction
+  if (lean) ctx.rotate(lean);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath(); ctx.ellipse(0, 2, 11, 3, 0, 0, Math.PI * 2); ctx.fill();
+
+  // Legs
+  const kf = kickFrame || 0;
+  ctx.strokeStyle = '#c4956a'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  // Left leg
+  ctx.beginPath(); ctx.moveTo(-4, -12); ctx.lineTo(-6, 0); ctx.stroke();
+  // Right leg (kicking animation)
+  ctx.beginPath();
+  ctx.moveTo(4, -12);
+  if (kf > 0 && kf < 6) {
+    const swing = Math.sin(kf * 0.8) * 14;
+    ctx.lineTo(4 + swing, -4 - Math.abs(swing) * 0.4);
+  } else {
+    ctx.lineTo(6, 0);
+  }
+  ctx.stroke();
+
+  // Boots
+  ctx.fillStyle = '#1a1a1a';
+  if (kf > 0 && kf < 6) {
+    const swing = Math.sin(kf * 0.8) * 14;
+    ctx.fillRect(-8, -2, 5, 3);
+    ctx.fillRect(2 + swing, -6 - Math.abs(swing) * 0.4, 5, 3);
+  } else {
+    ctx.fillRect(-8, -2, 5, 3);
+    ctx.fillRect(3, -2, 5, 3);
+  }
+
+  // Shorts
+  ctx.fillStyle = shorts;
+  ctx.fillRect(-6, -17, 12, 6);
+
+  // Jersey
+  ctx.fillStyle = jersey;
+  ctx.fillRect(-9, -32, 18, 17);
+  // Argentina stripes for player (non-goalie)
+  if (!gloves) {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(-9, -32, 4, 17);
+    ctx.fillRect(-1, -32, 4, 17);
+    ctx.fillRect(7, -32, 4, 17);
+  }
+
+  // Arms
+  ctx.strokeStyle = '#c4956a'; ctx.lineWidth = 2.5;
+  const armExt = gloves ? 5 : 0;
+  ctx.beginPath(); ctx.moveTo(-9, -28); ctx.lineTo(-14 - armExt, -18); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(9, -28);  ctx.lineTo(14 + armExt, -18);  ctx.stroke();
+
+  if (gloves) {
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath(); ctx.arc(-14 - armExt, -18, 3.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(14 + armExt, -18, 3.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Head
+  ctx.fillStyle = '#c4956a';
+  ctx.beginPath(); ctx.arc(0, -38, 6.5, 0, Math.PI * 2); ctx.fill();
+  // Hair
+  ctx.fillStyle = '#2a1a0a';
+  ctx.beginPath(); ctx.arc(0, -41, 6.5, Math.PI, 0); ctx.fill();
+  // Jersey number
+  ctx.fillStyle = gloves ? '#000' : '#fff';
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(gloves ? '1' : '10', 0, -25);
+
+  ctx.restore();
+}
+
+function drawBallTrail() {
+  if (!G.ball.trail || G.ball.trail.length < 2) return;
+  const n = G.ball.trail.length;
+  for (let i = 0; i < n; i++) {
+    const p = G.ball.trail[i];
+    const a = (i / n) * 0.5;
+    const rad = 2 + (i / n) * 5;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(p.x, p.y, rad, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawBall(x, y, spin) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(spin || 0);
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath(); ctx.ellipse(1, 9, 7, 3, 0, 0, Math.PI * 2); ctx.fill();
+  // Ball body
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#bbb'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI * 2); ctx.stroke();
+  // Classic panel pattern
+  ctx.strokeStyle = '#999'; ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2 - Math.PI / 2;
+    const px = Math.cos(a) * 4.5, py = Math.sin(a) * 4.5;
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  }
+  ctx.closePath(); ctx.stroke();
+  ctx.restore();
+}
+
+
+
+function drawScoreboard() {
+  if (G.state === 'title' || G.state === 'done') return;
+
+  const barH = 56;
+  // Solid opaque background
+  ctx.fillStyle = '#0f1118';
+  ctx.fillRect(0, 0, W, barH);
+  // Bottom accent
+  ctx.fillStyle = '#e94560';
+  ctx.fillRect(0, barH, W, 2);
+
+  const items = G.phase === 'model' ? MODELS : G.phase === 'reasoning' ? REASONING : SPEED;
+  const idx   = G.phase === 'model' ? G.modelIdx : G.phase === 'reasoning' ? G.reasoningIdx : G.speedIdx;
+  const label = G.phase === 'model' ? 'MODEL' : G.phase === 'reasoning' ? 'REASONING' : 'SPEED';
+
+  // Left: phase label + locked selections
+  ctx.font = 'bold 12px system-ui, sans-serif'; ctx.textAlign = 'left';
+  ctx.fillStyle = '#e94560';
+  ctx.fillText('⚽ ' + label, 14, 20);
+
+  let infoY = 36;
+  ctx.font = '11px system-ui, sans-serif';
+  if (G.selectedModel) {
+    ctx.fillStyle = '#4ade80';
+    ctx.fillText('✓ ' + G.selectedModel, 14, infoY); infoY += 14;
+  }
+  if (G.selectedReasoning) {
+    ctx.fillStyle = '#4ade80';
+    ctx.fillText('✓ ' + G.selectedReasoning, 14, infoY);
+  }
+
+  // Right: option pills
+  const leftM = 160, rightM = 20;
+  const totalW = W - leftM - rightM;
+  const iw = totalW / items.length;
+
+  items.forEach((item, i) => {
+    const cx = leftM + i * iw + iw / 2;
+    if (i === idx) {
+      ctx.font = 'bold 14px system-ui, sans-serif';
+      const pw = ctx.measureText(item).width + 30;
+      const ph = 32;
+      ctx.fillStyle = '#e94560';
+      roundRect(cx - pw / 2, (barH - ph) / 2, pw, ph, 6);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+    } else {
+      ctx.font = '13px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(item, cx, barH / 2);
+  });
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawAimIndicator() {
+  if (G.state !== 'aim' && G.state !== 'power') return;
+  ctx.save();
+  ctx.setLineDash([3, 6]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(G.ball.x, G.ball.y);
+  ctx.lineTo(G.player.x, GOAL.b + 5);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // Target reticle
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.beginPath(); ctx.arc(G.player.x, GOAL.b + 2, 5, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+
+function drawWindIndicator() {
+  if (G.state === 'title' || G.state === 'done') return;
+  const x = W - 70;
+  const y = 80;
+  const len = 18 + Math.abs(G.wind) * 22;
+  ctx.save();
+  ctx.globalAlpha = 0.6;
+  ctx.font = 'bold 10px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('WIND', x, y - 12);
+  const clr = G.wind < 0 ? '#60a5fa' : '#f59e0b';
+  ctx.strokeStyle = clr; ctx.fillStyle = clr;
+  ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x - len / 2 * Math.sign(G.wind), y);
+  ctx.lineTo(x + len / 2 * Math.sign(G.wind), y);
+  ctx.stroke();
+  const tip = x + len / 2 * Math.sign(G.wind);
+  ctx.beginPath();
+  ctx.moveTo(tip, y);
+  ctx.lineTo(tip - 6 * Math.sign(G.wind), y - 4);
+  ctx.lineTo(tip - 6 * Math.sign(G.wind), y + 4);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawPowerMeter() {
+  if (G.state !== 'power') return;
+  const x = 32;
+  const y = 160;
+  const w = 22;
+  const h = 240;
+  const fillH = h * G.power;
+  const sweetY = y + h * (1 - SWEET_POWER_MAX);
+  const sweetH = h * (SWEET_POWER_MAX - SWEET_POWER_MIN);
+  ctx.save();
+  // Background panel
+  ctx.fillStyle = 'rgba(10,10,20,0.88)';
+  roundRect(x - 10, y - 28, w + 56, h + 50, 8);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1;
+  roundRect(x - 10, y - 28, w + 56, h + 50, 8);
+  ctx.stroke();
+  // Meter track
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  roundRect(x, y, w, h, 4); ctx.fill();
+  // Sweet spot zone
+  ctx.fillStyle = 'rgba(16,185,129,0.2)';
+  ctx.fillRect(x, sweetY, w, sweetH);
+  // Fill
+  const fillColor = G.power < SWEET_POWER_MIN ? '#60a5fa' : G.power > SWEET_POWER_MAX ? '#ef4444' : '#10b981';
+  ctx.fillStyle = fillColor;
+  roundRect(x, y + h - fillH, w, fillH, 4); ctx.fill();
+  // Meter border
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1.5;
+  roundRect(x, y, w, h, 4); ctx.stroke();
+  // Label
+  ctx.font = 'bold 11px system-ui, sans-serif'; ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('PWR', x + w / 2, y - 10);
+  // Percentage
+  ctx.font = 'bold 14px system-ui, sans-serif';
+  ctx.fillStyle = fillColor;
+  ctx.fillText(Math.round(G.power * 100) + '%', x + w / 2, y + h + 20);
+  ctx.restore();
+}
+
+function drawAttemptCounter() {
+  if (G.state === 'title' || G.state === 'done') return;
+  const attempt = G.state === 'aim' || G.state === 'power' ? G.kicks + 1 : G.kicks;
+  ctx.save();
+  ctx.font = 'bold 14px monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillText('Attempt #' + attempt, W - 13, H - 13);
+  ctx.fillStyle = '#ffdf00';
+  ctx.fillText('Attempt #' + attempt, W - 15, H - 15);
+  ctx.restore();
+}
+
+function drawTaunt() {
+  if (!G.taunt || G.tauntTimer <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, G.tauntTimer / 20);
+  ctx.font = 'bold 18px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillText(G.taunt, G.goalie.x + 2, GOALIE_Y - 64);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(G.taunt, G.goalie.x, GOALIE_Y - 66);
+  ctx.restore();
+}
+
+function drawHardModeFlash() {
+  if (G.hardFlash <= 0) return;
+  const a = Math.min(1, G.hardFlash / 24);
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.fillStyle = 'rgba(239,68,68,0.18)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.font = '900 56px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillText('HARD MODE', W / 2 + 3, H / 2 - 96 + 3);
+  ctx.fillStyle = '#ef4444';
+  ctx.fillText('HARD MODE', W / 2, H / 2 - 96);
+  ctx.font = 'bold 18px monospace';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('goalie +30% speed, you -20% dignity', W / 2, H / 2 - 50);
+  ctx.restore();
+}
+
+function drawCommentary() {
+  if (!G.commentary || (G.state !== 'celebrate' && G.state !== 'miss')) return;
+  const fadeAt = G.state === 'celebrate' ? 80 : 60;
+  const fadeLen = 40;
+  let alpha = G.st < fadeAt ? 1 : Math.max(0, 1 - (G.st - fadeAt) / fadeLen);
+  if (alpha <= 0) return;
+
+  const scale = Math.min(1, G.st / 8);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(W / 2, H / 2 - 30);
+  ctx.scale(scale, scale);
+
+  ctx.font = 'bold 54px system-ui, Arial, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillText(G.commentary, 3, 3);
+  // Main
+  ctx.fillStyle = G.state === 'celebrate' ? '#ffdf00' : '#ef4444';
+  ctx.fillText(G.commentary, 0, 0);
+
+  // Subtext
+  if (G.subtext) {
+    ctx.font = 'bold 22px monospace';
+    ctx.fillStyle = '#fff';
+    ctx.fillText(G.subtext, 0, 44);
+  }
+
+  ctx.restore();
+}
+
+function drawParticles() {
+  G.particles.forEach(p => {
+    ctx.globalAlpha = Math.min(1, p.life / 40);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.sz / 2, p.y - p.sz / 2, p.sz, p.sz);
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawHints() {
+  if (G.state !== 'aim') return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.74)';
+  roundRect(W / 2 - 198, H - 34, 396, 28, 7);
+  ctx.fill();
+  ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#fff';
+  const isMobile = 'ontouchstart' in window;
+  ctx.fillText(isMobile ? 'Tap sides to aim, center to kick' : '← → aim    SPACE power    SPACE again kick', W / 2, H - 20);
+
+  // Phase instruction
+  const items = G.phase === 'model' ? MODELS : G.phase === 'reasoning' ? REASONING : SPEED;
+  const idx = G.phase === 'model' ? G.modelIdx : G.phase === 'reasoning' ? G.reasoningIdx : G.speedIdx;
+  ctx.fillStyle = 'rgba(0,0,0,0.74)';
+  roundRect(W / 2 - 180, 56, 360, 28, 7);
+  ctx.fill();
+  ctx.font = 'bold 14px monospace';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Score to select: ' + items[idx], W / 2, 70);
+  ctx.restore();
+}
+
+function drawTitle() {
+  // Pitch in background
+  ctx.save(); ctx.globalAlpha = 0.18;
+  drawPitch(); drawGoal();
+  ctx.restore();
+  // Overlay
+  ctx.fillStyle = 'rgba(10,10,20,0.75)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  // Title
+  const wobble = reduceMotion ? 0 : Math.sin(G.t * 0.04) * 3;
+  ctx.font = 'bold 42px system-ui, Arial, sans-serif';
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillText('⚽ WORST MODEL PICKER ⚽', W / 2 + 2, 142 + wobble + 2);
+  ctx.fillStyle = '#ffdf00';
+  ctx.fillText('⚽ WORST MODEL PICKER ⚽', W / 2, 142 + wobble);
+
+  ctx.font = 'bold 28px system-ui, Arial, sans-serif';
+  ctx.fillStyle = '#e94560';
+  ctx.fillText('IN THE WORLD', W / 2, 190);
+
+  // Bouncing ball
+  const by = 280 + Math.abs(Math.sin(G.t * 0.06)) * 30;
+  drawBall(W / 2, by, G.t * 0.04);
+
+  // Instructions
+  ctx.font = '15px monospace'; ctx.fillStyle = '#dbe4ef';
+  ctx.fillText('Pick your Codex model, reasoning, and speed', W / 2, 370);
+  ctx.fillText('by scoring penalty goals.', W / 2, 395);
+
+  ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#f8fafc';
+  ctx.fillText('Miss? The option cycles. Good luck.', W / 2, 435);
+
+  ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#f8fafc';
+  const isMob = 'ontouchstart' in window;
+  ctx.fillText(isMob ? 'Tap sides to aim, center to kick' : '← → aim    SPACE power    SPACE again kick', W / 2, 475);
+
+  // Start prompt
+  if (Math.sin(G.t * 0.07) > -0.2) {
+    ctx.font = 'bold 20px system-ui, sans-serif';
+    ctx.fillStyle = '#ffdf00';
+    ctx.fillText('Press SPACE to begin', W / 2, 530);
+  }
+}
+
+function drawDone() {
+  // Pitch behind
+  ctx.save(); ctx.globalAlpha = 0.06;
+  drawPitch();
+  ctx.restore();
+  // Dark overlay
+  ctx.fillStyle = 'rgba(10,10,20,0.92)';
+  ctx.fillRect(0, 0, W, H);
+
+  drawParticles();
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  // Trophy
+  ctx.font = '64px serif';
+  ctx.fillText('🏆', W / 2, 105);
+
+  // Title
+  ctx.font = 'bold 28px system-ui, sans-serif';
+  ctx.fillStyle = '#ffdf00';
+  ctx.fillText('SELECTION COMPLETE!', W / 2, 175);
+
+  // Stats
+  ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.fillText(G.goals + ' goals from ' + G.kicks + ' attempts', W / 2, 205);
+
+  // Card backdrop
+  ctx.fillStyle = 'rgba(255,255,255,0.04)';
+  roundRect(W / 2 - 180, 230, 360, 240, 12);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+  roundRect(W / 2 - 180, 230, 360, 240, 12);
+  ctx.stroke();
+
+  // Model
+  ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText('Model', W / 2, 265);
+  ctx.font = 'bold 22px system-ui, sans-serif'; ctx.fillStyle = '#fff';
+  ctx.fillText(G.selectedModel, W / 2, 293);
+
+  // Divider
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  ctx.fillRect(W / 2 - 100, 315, 200, 1);
+
+  // Reasoning
+  ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText('Reasoning', W / 2, 340);
+  ctx.font = 'bold 22px system-ui, sans-serif'; ctx.fillStyle = '#fff';
+  ctx.fillText(G.selectedReasoning, W / 2, 368);
+
+  // Divider
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  ctx.fillRect(W / 2 - 100, 390, 200, 1);
+
+  // Speed
+  ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText('Speed', W / 2, 415);
+  ctx.font = 'bold 22px system-ui, sans-serif'; ctx.fillStyle = '#fff';
+  ctx.fillText(G.selectedSpeed, W / 2, 443);
+
+  // Restart
+  ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.fillText('Press R to pick again', W / 2, 530);
+}
+
+// ── Main Draw ───────────────────────────────
+function draw() {
+  ctx.save();
+  // Screen shake
+  if (!reduceMotion && G.shake > 0.5) {
+    ctx.translate(
+      (Math.random() - 0.5) * G.shake,
+      (Math.random() - 0.5) * G.shake
+    );
+  }
+
+  if (G.state === 'title') {
+    drawTitle();
+  } else if (G.state === 'done') {
+    drawDone();
+  } else {
+    drawPitch();
+    drawGoal();
+    drawAimIndicator();
+    drawWindIndicator();
+    // Goalie
+    drawChar(G.goalie.x, GOALIE_Y, '#dc2626', '#111', true, 0, G.goalie.lean);
+    // Ball (draw under player when with them, over when kicked)
+    if (G.state === 'kick' || G.state === 'celebrate' || G.state === 'miss') {
+      drawChar(G.player.x, PLAYER_Y, '#75aadb', '#111', false, G.runUp);
+      drawBallTrail();
+      drawBall(G.ball.x, G.ball.y, G.ball.spin);
+    } else {
+      drawBall(G.ball.x, G.ball.y, G.ball.spin);
+      drawChar(G.player.x, PLAYER_Y, '#75aadb', '#111', false, 0);
+    }
+    drawParticles();
+    drawScoreboard();
+    drawHints();
+    drawPowerMeter();
+    drawAttemptCounter();
+    drawTaunt();
+    drawHardModeFlash();
+    drawCommentary();
+  }
+
+  ctx.restore();
+}
+
+// ── Game Loop ───────────────────────────────
+function loop() {
+  update();
+  draw();
+  // Clear single-fire keys at end of frame
+  for (const k in pressed) pressed[k] = false;
+  requestAnimationFrame(loop);
+}
+loop();
+
+// Resume audio context on first interaction
+document.addEventListener('click', () => ensureAudio(), { once: true });
+  </script>
+</body>
+</html>
