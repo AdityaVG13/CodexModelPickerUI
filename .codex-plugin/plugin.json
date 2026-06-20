@@ -1,0 +1,41 @@
+{
+  "name": "worst-model-picker",
+  "version": "0.1.0",
+  "description": "The worst possible Codex model picker, packaged as a Codex plugin.",
+  "author": {
+    "name": "Aditya"
+  },
+  "homepage": "https://adityavg13.github.io/CodexModelPickerUI/",
+  "repository": "https://github.com/adityavg13/CodexModelPickerUI",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "model-picker",
+    "game",
+    "worst-ui"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Worst Model Picker",
+    "shortDescription": "Pick a Codex model by taking penalty kicks.",
+    "longDescription": "Worst Model Picker brings the deliberately awful soccer penalty UI into Codex as an installable plugin. Launch it from Codex, play the picker, then use the selected model, reasoning, and speed as your session setup.",
+    "developerName": "Aditya",
+    "category": "Fun",
+    "capabilities": [
+      "Interactive"
+    ],
+    "websiteURL": "https://adityavg13.github.io/CodexModelPickerUI/",
+    "privacyPolicyURL": "https://openai.com/policies/privacy-policy/",
+    "termsOfServiceURL": "https://openai.com/policies/row-terms-of-use/",
+    "defaultPrompt": [
+      "Open the worst model picker",
+      "Help me pick a Codex model badly"
+    ],
+    "brandColor": "#2F9E44",
+    "composerIcon": "./assets/logo.png",
+    "logo": "./assets/logo.png",
+    "screenshots": [
+      "./assets/screenshot-title.png"
+    ]
+  }
+}

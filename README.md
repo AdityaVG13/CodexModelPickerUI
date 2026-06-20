@@ -10,6 +10,23 @@
 
 You pick your Codex model, reasoning level, and speed by scoring penalty goals. Miss and the option cycles. The goalie gets harder each round.
 
+## Add it to Codex
+
+This repo is also a Codex plugin. From the repo root:
+
+```bash
+./install-codex-plugin.sh
+codex plugin add worst-model-picker@personal
+```
+
+Then start a new Codex thread and ask:
+
+```text
+Open the worst model picker
+```
+
+The plugin bundles the game, adds a Codex plugin card, and exposes a launch skill that opens `index.html` locally.
+
 ## How to Play
 
 | Control | Action |
