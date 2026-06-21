@@ -263,9 +263,9 @@ function spawnParticles(x, y, n, colors) {
 }
 
 // ── Update ──────────────────────────────────
-function update() {
-  G.t++;
-  G.st++;
+function update(dt = 1) {
+  G.t += dt;
+  G.st += dt;
 
   if (consume('KeyM')) muted = !muted;
   if (consume('Escape') && G.state !== 'title' && G.state !== 'done') resetGame();
@@ -273,21 +273,21 @@ function update() {
   // Particles
   for (let i = G.particles.length - 1; i >= 0; i--) {
     const p = G.particles[i];
-    p.x += p.vx; p.y += p.vy; p.vy += 0.18; p.life--;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 0.18 * dt; p.life -= dt;
     if (p.life <= 0) G.particles.splice(i, 1);
   }
   if (reduceMotion) G.shake = 0;
-  else if (G.shake > 0.3) G.shake *= 0.88;
+  else if (G.shake > 0.3) G.shake *= Math.pow(0.88, dt);
   else G.shake = 0;
-  if (G.tauntTimer > 0) G.tauntTimer--;
-  if (G.hardFlash > 0) G.hardFlash--;
+  if (G.tauntTimer > 0) G.tauntTimer -= dt;
+  if (G.hardFlash > 0) G.hardFlash -= dt;
   // Net ripple aging
-  if (G.netRipple) { G.netRipple.age++; if (G.netRipple.age > 60) G.netRipple = null; }
+  if (G.netRipple) { G.netRipple.age += dt; if (G.netRipple.age > 60) G.netRipple = null; }
   // Post clang aging
-  if (G.postClang) { G.postClang.age++; if (G.postClang.age > 40) G.postClang = null; }
+  if (G.postClang) { G.postClang.age += dt; if (G.postClang.age > 40) G.postClang = null; }
 
   // Run-up animation
-  if (G.runUp > 0 && G.runUp < 8) G.runUp++;
+  if (G.runUp > 0 && G.runUp < 8) G.runUp += dt;
 
   switch (G.state) {
     case 'title':
@@ -299,8 +299,8 @@ function update() {
     case 'aim': {
       const hardMode = G.phase !== 'model';
       const playerSpeed = hardMode ? 3.2 : 4;
-      if (keys.ArrowLeft)  G.player.x = Math.max(PLAYER_MIN_X, G.player.x - playerSpeed);
-      if (keys.ArrowRight) G.player.x = Math.min(PLAYER_MAX_X, G.player.x + playerSpeed);
+      if (keys.ArrowLeft)  G.player.x = Math.max(PLAYER_MIN_X, G.player.x - playerSpeed * dt);
+      if (keys.ArrowRight) G.player.x = Math.min(PLAYER_MAX_X, G.player.x + playerSpeed * dt);
       G.ball.x = G.player.x;
       G.ball.y = PLAYER_Y - 48;
 
@@ -319,7 +319,7 @@ function update() {
       const d = DIFF[G.phase];
       const hardMode = G.phase !== 'model';
       const goalieSpd = hardMode ? d.spd * 1.3 : d.spd;
-      G.power += 0.018 * G.powerDir;
+      G.power += 0.018 * G.powerDir * dt;
       if (G.power >= 1) { G.power = 1; G.powerDir = -1; }
       if (G.power <= 0) { G.power = 0; G.powerDir = 1; }
       G.ball.x = G.player.x;
@@ -334,10 +334,10 @@ function update() {
     }
 
     case 'kick': {
-      G.ball.vx += G.wind * 0.035;
-      G.ball.x += G.ball.vx;
-      G.ball.y += G.ball.vy;
-      G.ball.spin += G.ball.vx * 0.003;
+      G.ball.vx += G.wind * 0.035 * dt;
+      G.ball.x += G.ball.vx * dt;
+      G.ball.y += G.ball.vy * dt;
+      G.ball.spin += G.ball.vx * 0.003 * dt;
 
       // Ball trail: record recent positions (capped)
       G.ball.trail.push({ x: G.ball.x, y: G.ball.y });
@@ -346,13 +346,13 @@ function update() {
       const d = DIFF[G.phase];
       const diveSpeed = G.phase !== 'model' ? d.dive * 1.3 : d.dive;
       const gdx = G.goalieTarget - G.goalie.x;
-      if (Math.abs(gdx) > diveSpeed) G.goalie.x += Math.sign(gdx) * diveSpeed;
+      if (Math.abs(gdx) > diveSpeed * dt) G.goalie.x += Math.sign(gdx) * diveSpeed * dt;
       else G.goalie.x = G.goalieTarget;
       G.goalie.x = Math.max(GOAL.l + 12, Math.min(GOAL.r - 12, G.goalie.x));
       // Goalie lean toward dive direction
-      G.goalie.lean += (Math.sign(gdx) * 0.6 - G.goalie.lean) * 0.25;
+      G.goalie.lean += (Math.sign(gdx) * 0.6 - G.goalie.lean) * (1 - Math.pow(0.75, dt));
       // Settle lean when reached target
-      if (Math.abs(gdx) <= diveSpeed) G.goalie.lean *= 0.85;
+      if (Math.abs(gdx) <= diveSpeed * dt) G.goalie.lean *= Math.pow(0.85, dt);
 
       // Post hit detection: ball passing near a post mid-flight
       if (!G.postClang) {
@@ -450,7 +450,7 @@ function update() {
     case 'done':
       if (consume('KeyR') || consume('Space') || consume('Enter')) resetGame();
       // Continuous confetti
-      if (!reduceMotion && G.t % 5 === 0)
+      if (!reduceMotion && Math.random() < 0.2 * dt)
         spawnParticles(Math.random() * W, -10, 3, ['#ffdf00','#e94560','#2563eb','#10b981','#8b5cf6','#f59e0b']);
       break;
   }
@@ -1091,14 +1091,18 @@ function draw() {
 }
 
 // ── Game Loop ───────────────────────────────
-function loop() {
-  update();
+const FRAME_MS = 1000 / 60;
+let lastFrameTime = performance.now();
+function loop(now) {
+  const dt = Math.min(2, Math.max(0, (now - lastFrameTime) / FRAME_MS));
+  lastFrameTime = now;
+  update(dt);
   draw();
   // Clear single-fire keys at end of frame
   for (const k in pressed) pressed[k] = false;
   requestAnimationFrame(loop);
 }
-loop();
+requestAnimationFrame(loop);
 
 // Resume audio context on first interaction
 document.addEventListener('click', () => ensureAudio(), { once: true });
